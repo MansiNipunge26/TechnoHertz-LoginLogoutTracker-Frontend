@@ -1,0 +1,9 @@
+
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://technohertz-loginlogouttracker-1.onrender.com/api/:path*"
+    }
+  ]
+}
