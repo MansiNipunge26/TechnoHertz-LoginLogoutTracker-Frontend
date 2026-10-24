@@ -2,30 +2,7 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 
-function formatDate(value) {
-  if (!value) return "—";
-
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? value
-    : date.toLocaleString("en-IN", {
-        dateStyle: "medium",
-        timeStyle: "short",
-      });
-}
-
-function formatDuration(seconds) {
-  if (seconds == null) return "In progress";
-
-  const total = Math.max(0, Number(seconds));
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const remainingSeconds = total % 60;
-
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m ${remainingSeconds}s`;
-  return `${remainingSeconds}s`;
-}
+const API_BASE = "/api/auth";
 
 function App() {
   const [username, setUsername] = useState("mansi");
@@ -33,27 +10,38 @@ function App() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [sessionId, setSessionId] = useState(null);
   const [userId, setUserId] = useState(null);
-  const [employeeName, setEmployeeName] = useState("Employee");
+  const [employeeName, setEmployeeName] = useState("");
   const [history, setHistory] = useState([]);
-  const [page, setPage] = useState("Dashboard");
-  const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState("All");
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [messageType, setMessageType] = useState("error");
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("All");
+  const [page, setPage] = useState("Dashboard");
 
-  async function loadHistory(id) {
-    const response = await fetch(`/api/auth/history/${id}`);
-    const data = await response.json();
+  const showMessage = (text, type = "error") => {
+    setMessage(text);
+    setMessageType(type);
+  };
 
-    if (!response.ok) {
-      throw new Error(data.message || "Could not load session history.");
+  const loadHistory = async (id = userId) => {
+    if (!id) return;
+
+    try {
+      const response = await fetch(`${API_BASE}/history/${id}`);
+
+      if (!response.ok) {
+        throw new Error("Unable to load login history.");
+      }
+
+      const data = await response.json();
+      setHistory(Array.isArray(data) ? data : []);
+    } catch (error) {
+      showMessage(error.message || "Could not load history.");
     }
+  };
 
-    setHistory(Array.isArray(data) ? data : []);
-  }
-
-  async function handleLogin(event) {
+  const handleLogin = async (event) => {
     event.preventDefault();
     setLoading(true);
     setMessage("");
@@ -63,141 +51,178 @@ function App() {
       body.append("username", username.trim());
       body.append("password", password);
 
-      const response = await fetch("/api/auth/login", {
+      const response = await fetch(`${API_BASE}/login`, {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
         },
-        body,
+        body: body.toString(),
       });
 
-      const data = await response.json();
+      const responseText = await response.text();
+      let data = {};
+
+      try {
+        data = responseText ? JSON.parse(responseText) : {};
+      } catch {
+        throw new Error(
+          "The server returned an unexpected response. Please try again."
+        );
+      }
 
       if (!response.ok) {
         throw new Error(
           data.message ||
             data.error ||
-            (response.status === 409
-              ? "An active session already exists for this user."
-              : "Login failed. Check your username and password.")
+            (response.status === 401
+              ? "Invalid username or password."
+              : response.status === 409
+                ? "An active session already exists."
+                : `Login failed (${response.status}).`)
         );
       }
 
-      const newSessionId = data.id ?? data.sessionId;
-      const newUserId = data.user?.id ?? data.userId;
+      const returnedUser = data.user || data;
+      const returnedSession = data.session || data.loginSession || data;
 
-      if (newSessionId == null || newUserId == null) {
+      const id =
+        returnedUser.userId ??
+        returnedUser.id ??
+        data.userId;
+
+      const currentSessionId =
+        returnedSession.sessionId ??
+        returnedSession.id ??
+        data.sessionId;
+
+      if (id == null || currentSessionId == null) {
         throw new Error(
-          "Login succeeded, but the response did not include the session ID and user ID."
+          "Login succeeded, but the server response did not contain the user ID and session ID."
         );
       }
 
-      setSessionId(newSessionId);
-      setUserId(newUserId);
+      setUserId(id);
+      setSessionId(currentSessionId);
       setEmployeeName(
-        data.user?.fullName || data.user?.username || username
+        returnedUser.fullName || returnedUser.username || username
       );
       setLoggedIn(true);
       setPage("Dashboard");
       setPassword("");
-      setMessageType("success");
-      setMessage("Login successful. Welcome to TechnoHertz!");
+      showMessage("Login successful.", "success");
 
-      try {
-        await loadHistory(newUserId);
-      } catch (historyError) {
-        setMessage(historyError.message);
-        setMessageType("error");
-      }
+      await loadHistory(id);
     } catch (error) {
-      setMessage(error.message || "Unable to connect to the server.");
-      setMessageType("error");
+      showMessage(error.message || "Unable to log in.");
     } finally {
       setLoading(false);
     }
-  }
+  };
 
-  async function handleLogout() {
-    if (sessionId == null) return;
+  const handleLogout = async () => {
+    if (sessionId == null) {
+      setLoggedIn(false);
+      return;
+    }
 
     setLoading(true);
-    setMessage("");
 
     try {
-      const response = await fetch(`/api/auth/logout/${sessionId}`, {
-        method: "POST",
-      });
+      const response = await fetch(
+        `${API_BASE}/logout/${sessionId}`,
+        { method: "POST" }
+      );
+
+      const responseText = await response.text();
 
       if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(
-          data.message || data.error || "Logout failed. Please try again."
-        );
-      }
+        let errorMessage = "Logout failed.";
 
-      if (userId != null) {
         try {
-          await loadHistory(userId);
+          const data = JSON.parse(responseText);
+          errorMessage = data.message || data.error || errorMessage;
         } catch {
-          // The logout request succeeded; history can be refreshed later.
+          if (responseText) errorMessage = responseText;
         }
+
+        throw new Error(errorMessage);
       }
 
+      await loadHistory(userId);
       setLoggedIn(false);
       setSessionId(null);
-      setUserId(null);
       setPassword("");
       setPage("Dashboard");
-      setMessageType("success");
-      setMessage("You have logged out successfully.");
+      showMessage("You have signed out successfully.", "success");
     } catch (error) {
-      setMessage(error.message || "Unable to log out.");
-      setMessageType("error");
+      showMessage(error.message || "Logout failed.");
     } finally {
       setLoading(false);
     }
-  }
+  };
 
   useEffect(() => {
-    if (!loggedIn || userId == null) return undefined;
-
-    const interval = setInterval(() => {
-      loadHistory(userId).catch(() => {});
-    }, 30000);
-
-    return () => clearInterval(interval);
+    if (loggedIn && userId != null) {
+      loadHistory(userId);
+    }
   }, [loggedIn, userId]);
 
-  const totalSessions = history.length;
+  const completedSessions = history.filter(
+    (item) =>
+      String(item.status || "").toUpperCase() === "LOGGED_OUT"
+  ).length;
+
   const activeSessions = history.filter(
     (item) => String(item.status || "").toUpperCase() === "ACTIVE"
   ).length;
-  const completedSessions = history.filter(
-    (item) => String(item.status || "").toUpperCase() === "COMPLETED"
-  ).length;
-  const totalSeconds = history.reduce(
-    (sum, item) => sum + Number(item.durationSeconds || 0),
-    0
-  );
+
+  const totalSeconds = history.reduce((total, item) => {
+    const duration = Number(item.durationSeconds);
+    return total + (Number.isFinite(duration) ? duration : 0);
+  }, 0);
+
+  const totalMinutes = Math.floor(totalSeconds / 60);
 
   const filteredHistory = history.filter((item) => {
-    const text = [
+    const status = String(item.status || "").toUpperCase();
+    const matchesFilter = filter === "All" || status === filter;
+    const searchText = [
       item.id,
       item.status,
       item.loginTime,
       item.logoutTime,
+      item.durationSeconds,
     ]
-      .filter(Boolean)
       .join(" ")
       .toLowerCase();
 
-    const matchesSearch = text.includes(search.toLowerCase());
-    const matchesFilter =
-      filter === "All" ||
-      String(item.status || "").toUpperCase() === filter.toUpperCase();
-
-    return matchesSearch && matchesFilter;
+    return matchesFilter && searchText.includes(search.toLowerCase());
   });
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) return String(value);
+
+    return date.toLocaleString();
+  };
+
+  const formatDuration = (seconds) => {
+    if (seconds == null || !Number.isFinite(Number(seconds))) {
+      return "In progress";
+    }
+
+    const total = Math.max(0, Number(seconds));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const remainingSeconds = Math.floor(total % 60);
+
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    if (minutes > 0) return `${minutes}m ${remainingSeconds}s`;
+    return `${remainingSeconds}s`;
+  };
 
   if (!loggedIn) {
     return (
@@ -207,80 +232,109 @@ function App() {
             <div className="brand-symbol">TH</div>
             <div>
               <div className="brand-name">TechnoHertz</div>
-              <div className="brand-subtitle">WORKSPACE</div>
+              <div className="brand-subtitle">EMPLOYEE WORKSPACE</div>
             </div>
           </div>
 
           <div className="brand-message">
-            <span className="eyebrow">EMPLOYEE WORKSPACE</span>
-            <h1>Every workday, in one place.</h1>
+            <span className="eyebrow">YOUR WORKDAY, SIMPLIFIED</span>
+            <h1>
+              Every moment
+              <br />
+              <span>makes an impact.</span>
+            </h1>
             <p>
-              Manage your attendance, monitor login sessions, and keep track
-              of your workday with your employee dashboard.
+              A smarter workspace to manage your attendance, track your
+              sessions, and stay connected with your workday.
             </p>
+
             <div className="brand-feature">
               <span className="feature-check">✓</span>
-              Secure employee access
+              <div>
+                <strong>Simple time tracking</strong>
+                <p>Keep track of your daily login and logout activity.</p>
+              </div>
             </div>
+
             <div className="brand-feature">
               <span className="feature-check">✓</span>
-              Transparent session tracking
-            </div>
-            <div className="brand-feature">
-              <span className="feature-check">✓</span>
-              Your activity in one workspace
+              <div>
+                <strong>Your activity in one place</strong>
+                <p>Review your session history whenever you need it.</p>
+              </div>
             </div>
           </div>
 
           <div className="brand-footer">
-            © 2026 TechnoHertz · Employee Portal
+            © {new Date().getFullYear()} TechnoHertz · Employee Portal
           </div>
         </section>
 
         <section className="login-form-panel">
           <form className="login-card" onSubmit={handleLogin}>
-            <div className="mobile-brand">TECHNOHERTZ</div>
-            <span className="eyebrow">WELCOME BACK</span>
-            <h2>Sign in to your account</h2>
+            <div className="mobile-brand">
+              <div className="brand-symbol">TH</div>
+              <span>TechnoHertz</span>
+            </div>
+
+            <span className="eyebrow">EMPLOYEE PORTAL</span>
+            <h2>Welcome back.</h2>
             <p className="muted">
-              Enter your employee credentials to continue.
+              Sign in with your employee credentials to continue.
             </p>
 
             {message && (
-              <div className={`notice ${messageType}`} role="alert">
+              <div
+                className={`notice ${messageType}`}
+                role="alert"
+              >
                 {message}
               </div>
             )}
 
-            <label htmlFor="username">Username</label>
-            <input
-              id="username"
-              type="text"
-              value={username}
-              onChange={(event) => setUsername(event.target.value)}
-              placeholder="Enter your username"
-              autoComplete="username"
-              required
-            />
+            <div className="form-group">
+              <label className="form-label" htmlFor="username">
+                Username
+              </label>
+              <input
+                className="form-input"
+                id="username"
+                type="text"
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                placeholder="Enter your username"
+                autoComplete="username"
+                required
+              />
+            </div>
 
-            <label htmlFor="password">Password</label>
-            <input
-              id="password"
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder="Enter your password"
-              autoComplete="current-password"
-              required
-            />
+            <div className="form-group">
+              <label className="form-label" htmlFor="password">
+                Password
+              </label>
+              <input
+                className="form-input"
+                id="password"
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="Enter your password"
+                autoComplete="current-password"
+                required
+              />
+            </div>
 
-            <button className="primary-button login-button" disabled={loading}>
+            <button
+              className="primary-button login-button"
+              type="submit"
+              disabled={loading}
+            >
               {loading ? "Signing in..." : "Sign in to workspace"}
               {!loading && <span>→</span>}
             </button>
 
             <div className="login-security">
-              <span>♧</span> Secure employee login
+              <span>✓</span> Secure employee authentication
             </div>
           </form>
         </section>
@@ -289,67 +343,73 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
+    <main className="app-shell">
       <aside className="sidebar">
         <div className="sidebar-brand">
           <div className="brand-symbol">TH</div>
           <div>
             <div className="brand-name">TechnoHertz</div>
-            <div className="brand-subtitle">WORKSPACE</div>
+            <div className="brand-subtitle">EMPLOYEE PORTAL</div>
           </div>
         </div>
 
-        <div className="nav-caption">WORKSPACE</div>
+        <div className="navigation-label">WORKSPACE</div>
 
         <nav className="navigation">
           <button
-            className={page === "Dashboard" ? "nav-item active" : "nav-item"}
+            className={`nav-item ${page === "Dashboard" ? "active" : ""}`}
             onClick={() => setPage("Dashboard")}
           >
             <span>▦</span> Dashboard
           </button>
           <button
-            className={
-              page === "Session History" ? "nav-item active" : "nav-item"
-            }
-            onClick={() => setPage("Session History")}
+            className={`nav-item ${page === "History" ? "active" : ""}`}
+            onClick={() => setPage("History")}
           >
-            <span>◷</span> Session History
+            <span>◷</span> Login History
           </button>
           <button
-            className={page === "My Profile" ? "nav-item active" : "nav-item"}
-            onClick={() => setPage("My Profile")}
+            className={`nav-item ${page === "Profile" ? "active" : ""}`}
+            onClick={() => setPage("Profile")}
           >
             <span>♙</span> My Profile
           </button>
         </nav>
 
         <div className="sidebar-bottom">
-          <div className="online-indicator">
-            <span className="green-dot" />
-            System connected
-          </div>
           <div className="sidebar-user">
-            <div className="avatar">{employeeName.charAt(0).toUpperCase()}</div>
-            <div className="sidebar-user-info">
-              <strong>{employeeName}</strong>
+            <div className="avatar">
+              {(employeeName || username).charAt(0).toUpperCase()}
+            </div>
+            <div className="sidebar-user-details">
+              <strong>{employeeName || username}</strong>
               <span>Employee</span>
             </div>
           </div>
+
+          <button
+            className="sidebar-signout"
+            onClick={handleLogout}
+            disabled={loading}
+          >
+            ↪ Sign out
+          </button>
         </div>
       </aside>
 
-      <main className="main-content">
+      <section className="main-content">
         <header className="topbar">
-          <div className="breadcrumb">
-            Workspace <span>/</span> <strong>{page}</strong>
+          <div>
+            <div className="breadcrumb">Workspace / {page}</div>
+            <h2>{page}</h2>
           </div>
+
           <div className="topbar-right">
             <span className="online-indicator">
-              <span className="green-dot" /> Online
+              <span /> Signed in
             </span>
-            <div className="avatar small">
-              {employeeName.charAt(0).toUpperCase()}
+            <div className="avatar">
+              {(employeeName || username).charAt(0).toUpperCase()}
             </div>
           </div>
         </header>
@@ -358,13 +418,6 @@ function App() {
           {message && (
             <div className={`notice ${messageType}`} role="status">
               {message}
-              <button
-                className="notice-close"
-                onClick={() => setMessage("")}
-                aria-label="Dismiss message"
-              >
-                ×
-              </button>
             </div>
           )}
 
@@ -372,164 +425,154 @@ function App() {
             <>
               <div className="page-heading">
                 <div>
-                  <span className="eyebrow">OVERVIEW</span>
-                  <h1>Good to see you, {employeeName.split(" ")[0]}.</h1>
-                  <p>Here is an overview of your employee sessions.</p>
+                  <span className="eyebrow">YOUR OVERVIEW</span>
+                  <h1>Good to see you, {employeeName || username}!</h1>
+                  <p>Here is a summary of your login activity.</p>
                 </div>
                 <button
-                  className="secondary-button"
-                  onClick={() =>
-                    loadHistory(userId).catch((error) => {
-                      setMessage(error.message);
-                      setMessageType("error");
-                    })
-                  }
+                  className="primary-button refresh-button"
+                  onClick={() => loadHistory()}
+                  disabled={loading}
                 >
-                  ↻ Refresh
+                  ↻ Refresh history
                 </button>
               </div>
 
-              <section className="stats-grid">
-                <div className="stat-card">
+              <div className="stats-grid">
+                <article className="stat-card">
                   <div className="stat-top">
-                    <span>Total sessions</span>
-                    <span className="stat-icon purple">▤</span>
+                    <span>Total Sessions</span>
+                    <div className="stat-icon blue">▦</div>
                   </div>
-                  <strong className="stat-number">{totalSessions}</strong>
-                  <span className="stat-description">Recorded sessions</span>
-                </div>
-                <div className="stat-card">
+                  <div className="stat-number">{history.length}</div>
+                  <div className="stat-description">
+                    All recorded login sessions
+                  </div>
+                </article>
+
+                <article className="stat-card">
                   <div className="stat-top">
-                    <span>Active sessions</span>
-                    <span className="stat-icon green">◉</span>
+                    <span>Active Sessions</span>
+                    <div className="stat-icon green">◉</div>
                   </div>
-                  <strong className="stat-number">{activeSessions}</strong>
-                  <span className="stat-description">Currently active</span>
-                </div>
-                <div className="stat-card">
+                  <div className="stat-number">{activeSessions}</div>
+                  <div className="stat-description">
+                    Sessions currently active
+                  </div>
+                </article>
+
+                <article className="stat-card">
                   <div className="stat-top">
-                    <span>Completed sessions</span>
-                    <span className="stat-icon blue">✓</span>
+                    <span>Completed Sessions</span>
+                    <div className="stat-icon purple">✓</div>
                   </div>
-                  <strong className="stat-number">{completedSessions}</strong>
-                  <span className="stat-description">Successfully logged out</span>
-                </div>
-                <div className="stat-card">
+                  <div className="stat-number">{completedSessions}</div>
+                  <div className="stat-description">
+                    Sessions with logout recorded
+                  </div>
+                </article>
+
+                <article className="stat-card">
                   <div className="stat-top">
-                    <span>Total tracked time</span>
-                    <span className="stat-icon orange">◷</span>
+                    <span>Total Time</span>
+                    <div className="stat-icon orange">◷</div>
                   </div>
-                  <strong className="stat-number">
-                    {formatDuration(totalSeconds)}
-                  </strong>
-                  <span className="stat-description">Recorded duration</span>
-                </div>
-              </section>
+                  <div className="stat-number">{totalMinutes}</div>
+                  <div className="stat-description">
+                    Minutes from recorded durations
+                  </div>
+                </article>
+              </div>
 
               <SessionTable
-                history={history.slice(0, 5)}
+                history={filteredHistory.slice(0, 5)}
                 search={search}
                 setSearch={setSearch}
                 filter={filter}
                 setFilter={setFilter}
-                fullHistory={false}
+                formatDate={formatDate}
+                formatDuration={formatDuration}
+                onViewAll={() => setPage("History")}
+                title="Recent Login Activity"
+                subtitle="Your latest employee login sessions."
               />
-
-              <div className="dashboard-footer">
-                <span>Showing your five most recent sessions</span>
-                <button className="text-button" onClick={() => setPage("Session History")}>
-                  View all sessions →
-                </button>
-              </div>
             </>
           )}
 
-          {page === "Session History" && (
+          {page === "History" && (
             <>
               <div className="page-heading">
                 <div>
-                  <span className="eyebrow">ACTIVITY</span>
-                  <h1>Session history</h1>
-                  <p>Review your recorded login and logout activity.</p>
+                  <span className="eyebrow">ACTIVITY RECORDS</span>
+                  <h1>Login History</h1>
+                  <p>Review your recorded login and logout sessions.</p>
                 </div>
                 <button
-                  className="secondary-button"
-                  onClick={() =>
-                    loadHistory(userId).catch((error) => {
-                      setMessage(error.message);
-                      setMessageType("error");
-                    })
-                  }
+                  className="primary-button refresh-button"
+                  onClick={() => loadHistory()}
+                  disabled={loading}
                 >
-                  ↻ Refresh
+                  ↻ Refresh history
                 </button>
               </div>
+
               <SessionTable
                 history={filteredHistory}
                 search={search}
                 setSearch={setSearch}
                 filter={filter}
                 setFilter={setFilter}
-                fullHistory
+                formatDate={formatDate}
+                formatDuration={formatDuration}
+                title="All Login Sessions"
+                subtitle="All recorded login activity for your account."
               />
             </>
           )}
 
-          {page === "My Profile" && (
-            <>
-              <div className="page-heading">
+          {page === "Profile" && (
+            <section className="profile-card">
+              <div className="profile-banner">
+                <div className="profile-avatar">
+                  {(employeeName || username).charAt(0).toUpperCase()}
+                </div>
                 <div>
-                  <span className="eyebrow">ACCOUNT</span>
-                  <h1>My profile</h1>
-                  <p>Your employee account information.</p>
+                  <h1>{employeeName || username}</h1>
+                  <p>TechnoHertz Employee</p>
                 </div>
               </div>
-              <section className="profile-card">
-                <div className="profile-banner" />
-                <div className="profile-details">
-                  <div className="avatar profile-avatar">
-                    {employeeName.charAt(0).toUpperCase()}
-                  </div>
-                  <h2>{employeeName}</h2>
-                  <p className="muted">TechnoHertz employee</p>
-                  <div className="profile-info-grid">
-                    <div>
-                      <span>Username</span>
-                      <strong>{username}</strong>
-                    </div>
-                    <div>
-                      <span>Employee / User ID</span>
-                      <strong>{userId}</strong>
-                    </div>
-                    <div>
-                      <span>Current session ID</span>
-                      <strong>{sessionId}</strong>
-                    </div>
-                    <div>
-                      <span>Account status</span>
-                      <strong className="status-text">● Logged in</strong>
-                    </div>
-                  </div>
+
+              <div className="profile-info-grid">
+                <div>
+                  <span>Full name</span>
+                  <strong>{employeeName || "Not available"}</strong>
                 </div>
-              </section>
-            </>
+                <div>
+                  <span>Username</span>
+                  <strong>{username}</strong>
+                </div>
+                <div>
+                  <span>User ID</span>
+                  <strong>{userId}</strong>
+                </div>
+                <div>
+                  <span>Session status</span>
+                  <strong className="profile-active">Signed in</strong>
+                </div>
+              </div>
+
+              <button
+                className="primary-button"
+                onClick={handleLogout}
+                disabled={loading}
+              >
+                {loading ? "Signing out..." : "Sign out"}
+              </button>
+            </section>
           )}
-
-          <footer className="main-footer">
-            <span>© 2026 TechnoHertz</span>
-            <span>Login Logout Tracker · Employee Workspace</span>
-          </footer>
         </div>
-      </main>
-
-      <button
-        className="floating-logout"
-        onClick={handleLogout}
-        disabled={loading}
-      >
-        {loading ? "Please wait..." : "↪ Log out"}
-      </button>
-    </div>
+      </section>
+    </main>
   );
 }
 
@@ -539,87 +582,94 @@ function SessionTable({
   setSearch,
   filter,
   setFilter,
-  fullHistory,
+  formatDate,
+  formatDuration,
+  onViewAll,
+  title,
+  subtitle,
 }) {
   return (
     <section className="table-card">
       <div className="table-heading">
         <div>
-          <h2>{fullHistory ? "All sessions" : "Recent sessions"}</h2>
-          <p>
-            {fullHistory
-              ? "All recorded login activity for your account."
-              : "A quick look at your recent login activity."}
-          </p>
+          <h2>{title}</h2>
+          <p>{subtitle}</p>
         </div>
-        <span className="record-count">{history.length} records</span>
+        {onViewAll && (
+          <button className="text-button" onClick={onViewAll}>
+            View all →
+          </button>
+        )}
       </div>
 
       <div className="table-tools">
-        <div className="search-box">
-          <span>⌕</span>
-          <input
-            aria-label="Search sessions"
-            placeholder="Search sessions..."
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
-        </div>
+        <input
+          className="search-box"
+          type="search"
+          placeholder="Search sessions..."
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          aria-label="Search login sessions"
+        />
+
         <select
-          aria-label="Filter session status"
+          className="filter-select"
           value={filter}
           onChange={(event) => setFilter(event.target.value)}
+          aria-label="Filter sessions by status"
         >
           <option value="All">All statuses</option>
           <option value="ACTIVE">Active</option>
-          <option value="COMPLETED">Completed</option>
+          <option value="LOGGED_OUT">Logged out</option>
         </select>
       </div>
 
       <div className="table-scroll">
-        <table>
+        <table className="session-table">
           <thead>
             <tr>
-              <th>SESSION ID</th>
-              <th>LOGIN TIME</th>
-              <th>LOGOUT TIME</th>
-              <th>DURATION</th>
-              <th>STATUS</th>
+              <th>Session ID</th>
+              <th>Login time</th>
+              <th>Logout time</th>
+              <th>Duration</th>
+              <th>Status</th>
             </tr>
           </thead>
+
           <tbody>
             {history.length === 0 ? (
               <tr>
                 <td colSpan="5" className="empty-state">
-                  No sessions found. Try refreshing or changing the filter.
+                  No sessions found. Try refreshing or changing your filters.
                 </td>
               </tr>
             ) : (
-              history.map((item) => {
-                const status = String(item.status || "UNKNOWN").toUpperCase();
-
-                return (
-                  <tr key={item.id}>
-                    <td className="session-id">#{item.id}</td>
-                    <td>{formatDate(item.loginTime)}</td>
-                    <td>{formatDate(item.logoutTime)}</td>
-                    <td>{formatDuration(item.durationSeconds)}</td>
-                    <td>
-                      <span
-                        className={`status-pill ${
-                          status === "ACTIVE" ? "active-status" : "done-status"
-                        }`}
-                      >
-                        <span className="status-dot" />
-                        {status}
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })
+              history.map((item) => (
+                <tr key={item.id}>
+                  <td>#{item.id}</td>
+                  <td>{formatDate(item.loginTime)}</td>
+                  <td>{formatDate(item.logoutTime)}</td>
+                  <td>{formatDuration(item.durationSeconds)}</td>
+                  <td>
+                    <span
+                      className={`status-pill ${
+                        String(item.status).toUpperCase() === "ACTIVE"
+                          ? "status-active"
+                          : "status-logged-out"
+                      }`}
+                    >
+                      {String(item.status || "UNKNOWN").replaceAll("_", " ")}
+                    </span>
+                  </td>
+                </tr>
+              ))
             )}
           </tbody>
         </table>
+      </div>
+
+      <div className="table-footer">
+        Showing {history.length} session{history.length === 1 ? "" : "s"}
       </div>
     </section>
   );
