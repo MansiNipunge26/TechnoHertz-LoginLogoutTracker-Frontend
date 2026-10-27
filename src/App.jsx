@@ -208,22 +208,37 @@ function App() {
 
     return date.toLocaleString();
   };
+  
+const formatDuration = (seconds, status) => {
+  // An active session has no final duration yet.
+  if (String(status || "").toUpperCase() === "ACTIVE") {
+    return "In progress";
+  }
 
-  const formatDuration = (seconds) => {
-    if (seconds == null || !Number.isFinite(Number(seconds))) {
-      return "In progress";
-    }
+  // Missing or invalid durations should not be treated as zero.
+  if (
+    seconds === null ||
+    seconds === undefined ||
+    seconds === "" ||
+    !Number.isFinite(Number(seconds)) ||
+    Number(seconds) < 0
+  ) {
+    return "Unavailable";
+  }
 
-    const total = Math.max(0, Number(seconds));
-    const hours = Math.floor(total / 3600);
-    const minutes = Math.floor((total % 3600) / 60);
-    const remainingSeconds = Math.floor(total % 60);
+  const total = Math.floor(Number(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const remainingSeconds = total % 60;
 
-    if (hours > 0) return `${hours}h ${minutes}m`;
-    if (minutes > 0) return `${minutes}m ${remainingSeconds}s`;
-    return `${remainingSeconds}s`;
-  };
+  return [
+    String(hours).padStart(2, "0"),
+    String(minutes).padStart(2, "0"),
+    String(remainingSeconds).padStart(2, "0"),
+  ].join(":");
+};
 
+ 
   if (!loggedIn) {
     return (
       <main className="login-page">
@@ -649,7 +664,7 @@ function SessionTable({
                   <td>#{item.id}</td>
                   <td>{formatDate(item.loginTime)}</td>
                   <td>{formatDate(item.logoutTime)}</td>
-                  <td>{formatDuration(item.durationSeconds)}</td>
+                  <td>{formatDuration(item.durationSeconds, item.status)}</td>
                   <td>
                     <span
                       className={`status-pill ${
